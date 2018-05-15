@@ -1,7 +1,7 @@
 import * as utils from 'src/utils';
-import { registerBidder } from 'src/adapters/bidderFactory';
-import { config } from 'src/config';
-import { BANNER, VIDEO } from 'src/mediaTypes';
+import {registerBidder} from 'src/adapters/bidderFactory';
+import {config} from 'src/config';
+import {BANNER, VIDEO} from 'src/mediaTypes';
 
 const INTEGRATION = 'pbjs_lite_v$prebid.version$';
 
@@ -12,7 +12,7 @@ function isSecure() {
 // use protocol relative urls for http or https
 const FASTLANE_ENDPOINT = '//fastlane.rubiconproject.com/a/api/fastlane.json';
 const VIDEO_ENDPOINT = '//fastlane-adv.rubiconproject.com/v1/auction/video';
-const SYNC_ENDPOINT = 'https://tap-secure.rubiconproject.com/partner/scripts/rubicon/emily.html?rtb_ext=1';
+const SYNC_ENDPOINT = 'https://eus.rubiconproject.com/usync.html';
 
 const TIMEOUT_BUFFER = 500;
 
@@ -37,6 +37,7 @@ var sizeMap = {
   43: '320x50',
   44: '300x50',
   48: '300x300',
+  53: '1024x768',
   54: '300x1050',
   55: '970x90',
   57: '970x250',
@@ -79,7 +80,7 @@ export const spec = {
    * @param {object} bid
    * @return boolean
    */
-  isBidRequestValid: function(bid) {
+  isBidRequestValid: function (bid) {
     if (typeof bid.params !== 'object') {
       return false;
     }
@@ -121,7 +122,7 @@ export const spec = {
    * @param bidderRequest
    * @return ServerRequest[]
    */
-  buildRequests: function(bidRequests, bidderRequest) {
+  buildRequests: function (bidRequests, bidderRequest) {
     return bidRequests.map(bidRequest => {
       bidRequest.startTime = new Date().getTime();
 
@@ -132,7 +133,8 @@ export const spec = {
         page_url = utils.getTopWindowUrl();
       }
 
-      page_url = bidRequest.params.secure ? page_url.replace(/^http:/i, 'https:') : page_url;
+      // GDPR reference, for use by 'banner' and 'video'
+      const gdprConsent = bidderRequest.gdprConsent;
 
       if (spec.hasVideoMediaType(bidRequest)) {
         let params = bidRequest.params;
@@ -147,6 +149,7 @@ export const spec = {
           timeout: bidderRequest.timeout - (Date.now() - bidderRequest.auctionStart + TIMEOUT_BUFFER),
           stash_creatives: true,
           ae_pass_through_parameters: params.video.aeParams,
+          rp_secure: bidRequest.params.secure !== false,
           slots: []
         };
 
@@ -178,6 +181,14 @@ export const spec = {
 
         data.slots.push(slotData);
 
+        if (gdprConsent) {
+          // add 'gdpr' only if 'gdprApplies' is defined
+          if (typeof gdprConsent.gdprApplies === 'boolean') {
+            data.gdpr = Number(gdprConsent.gdprApplies);
+          }
+          data.gdpr_consent = gdprConsent.consentString;
+        }
+
         return {
           method: 'POST',
           url: VIDEO_ENDPOINT,
@@ -196,7 +207,8 @@ export const spec = {
         keywords,
         visitor,
         inventory,
-        userId
+        userId,
+        latLong: [latitude, longitude] = [],
       } = bidRequest.params;
 
       // defaults
@@ -220,8 +232,18 @@ export const spec = {
         'x_source.tid', bidRequest.transactionId,
         'p_screen_res', _getScreenResolution(),
         'kw', keywords,
-        'tk_user_key', userId
+        'tk_user_key', userId,
+        'p_geo.latitude', isNaN(parseFloat(latitude)) ? undefined : parseFloat(latitude).toFixed(4),
+        'p_geo.longitude', isNaN(parseFloat(longitude)) ? undefined : parseFloat(longitude).toFixed(4)
       ];
+
+      if (gdprConsent) {
+        // add 'gdpr' only if 'gdprApplies' is defined
+        if (typeof gdprConsent.gdprApplies === 'boolean') {
+          data.push('gdpr', Number(gdprConsent.gdprApplies));
+        }
+        data.push('gdpr_consent', gdprConsent.consentString);
+      }
 
       if (visitor !== null && typeof visitor === 'object') {
         utils._each(visitor, (item, key) => data.push(`tg_v.${key}`, item));
@@ -240,7 +262,7 @@ export const spec = {
 
       data = data.reduce(
         (memo, curr, index) =>
-          index % 2 === 0 && data[index + 1] !== undefined
+          index % 2 === 0 && data[index + 1] !== undefined && !isNaN(data[index + 1])
             ? memo + curr + '=' + encodeURIComponent(data[index + 1]) + '&' : memo,
         ''
       ).slice(0, -1); // remove trailing &
@@ -259,7 +281,7 @@ export const spec = {
    * @param {BidRequest} bidRequest
    * @returns {boolean}
    */
-  hasVideoMediaType: function(bidRequest) {
+  hasVideoMediaType: function (bidRequest) {
     return (typeof utils.deepAccess(bidRequest, 'params.video.size_id') !== 'undefined' &&
       (bidRequest.mediaType === VIDEO || utils.deepAccess(bidRequest, `mediaTypes.${VIDEO}.context`) === 'instream'));
   },
@@ -268,8 +290,8 @@ export const spec = {
    * @param {BidRequest} bidRequest
    * @return {Bid[]} An array of bids which
    */
-  interpretResponse: function(responseObj, {bidRequest}) {
-    responseObj = responseObj.body
+  interpretResponse: function (responseObj, {bidRequest}) {
+    responseObj = responseObj.body;
     let ads = responseObj.ads;
 
     // check overall response
@@ -336,12 +358,24 @@ export const spec = {
       return bids;
     }, []);
   },
-  getUserSyncs: function(syncOptions) {
+  getUserSyncs: function (syncOptions, responses, gdprConsent) {
     if (!hasSynced && syncOptions.iframeEnabled) {
+      // data is only assigned if params are available to pass to SYNC_ENDPOINT
+      let params = '';
+
+      if (gdprConsent && typeof gdprConsent.consentString === 'string') {
+        // add 'gdpr' only if 'gdprApplies' is defined
+        if (typeof gdprConsent.gdprApplies === 'boolean') {
+          params += `?gdpr=${Number(gdprConsent.gdprApplies)}&gdpr_consent=${gdprConsent.consentString}`;
+        } else {
+          params += `?gdpr_consent=${gdprConsent.consentString}`;
+        }
+      }
+
       hasSynced = true;
       return {
         type: 'iframe',
-        url: SYNC_ENDPOINT
+        url: SYNC_ENDPOINT + params
       };
     }
   }
@@ -360,6 +394,7 @@ function _getDigiTrustQueryParams() {
     let digiTrustUser = window.DigiTrust && (config.getConfig('digiTrustId') || window.DigiTrust.getUser({member: 'T9QSFKPDN9'}));
     return (digiTrustUser && digiTrustUser.success && digiTrustUser.identity) || null;
   }
+
   let digiTrustId = getDigiTrustId();
   // Verify there is an ID and this user has not opted out
   if (!digiTrustId || (digiTrustId.privacy && digiTrustId.privacy.optout)) {
@@ -407,7 +442,7 @@ function parseSizes(bid) {
 
 function mapSizes(sizes) {
   return utils.parseSizesInput(sizes)
-    // map sizes while excluding non-matches
+  // map sizes while excluding non-matches
     .reduce((result, size) => {
       let mappedSize = parseInt(sizeMap[size], 10);
       if (mappedSize) {
@@ -448,8 +483,14 @@ export function masSizeOrdering(sizes) {
 }
 
 var hasSynced = false;
+
 export function resetUserSync() {
   hasSynced = false;
+}
+
+function isNaN(value) {
+  // eslint-disable-next-line no-self-compare
+  return value !== value;
 }
 
 registerBidder(spec);

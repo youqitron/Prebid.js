@@ -1,5 +1,5 @@
 import { expect } from 'chai'
-import { spec } from 'modules/sonobiBidAdapter'
+import { spec, _getPlatform } from 'modules/sonobiBidAdapter'
 import { newBidder } from 'src/adapters/bidderFactory'
 
 describe('SonobiBidAdapter', () => {
@@ -107,6 +107,7 @@ describe('SonobiBidAdapter', () => {
         'placement_id': '1a2b3c4d5e6f1a2b3c4d',
         'sizes': [[300, 250], [300, 600]],
         'floor': '1.25',
+        'referrer': 'overrides_top_window_location'
       },
       'adUnitCode': 'adunit-code-1',
       'sizes': [[300, 250], [300, 600]],
@@ -117,6 +118,7 @@ describe('SonobiBidAdapter', () => {
       'params': {
         'ad_unit': '/7780971/sparks_prebid_LB',
         'sizes': [[300, 250], [300, 600]],
+        'referrer': 'overrides_top_window_location'
       },
       'adUnitCode': 'adunit-code-2',
       'sizes': [[120, 600], [300, 600], [160, 600]],
@@ -139,6 +141,8 @@ describe('SonobiBidAdapter', () => {
       expect(bidRequests.data.pv).to.equal(bidRequestsPageViewID.data.pv)
       expect(bidRequests.data.hfa).to.not.exist
       expect(bidRequests.bidderRequests).to.eql(bidRequest);
+      expect(bidRequests.data.ref).to.equal('overrides_top_window_location');
+      expect(['mobile', 'tablet', 'desktop']).to.contain(bidRequests.data.vp);
     })
 
     it('should return a properly formatted request with hfa', () => {
@@ -150,6 +154,10 @@ describe('SonobiBidAdapter', () => {
       expect(bidRequests.data.ref).not.to.be.empty
       expect(bidRequests.data.s).not.to.be.empty
       expect(bidRequests.data.hfa).to.equal('hfakey')
+    })
+    it('should return null if there is nothing to bid on', () => {
+      const bidRequests = spec.buildRequests([{params: {}}])
+      expect(bidRequests).to.equal(null);
     })
   })
 
@@ -276,6 +284,9 @@ describe('SonobiBidAdapter', () => {
         url: 'https://pixel-test'
       }]);
     })
+    it('should return an empty array when sync is enabled but there are no bidResponses', () => {
+      expect(spec.getUserSyncs({ pixelEnabled: true }, [])).to.have.length(0);
+    })
 
     it('should return an empty array when sync is enabled but no sync pixel returned', () => {
       const pixel = Object.assign({}, bidResponse);
@@ -285,6 +296,17 @@ describe('SonobiBidAdapter', () => {
 
     it('should return an empty array', () => {
       expect(spec.getUserSyncs({ pixelEnabled: false }, bidResponse)).to.have.length(0);
+    })
+  })
+  describe('_getPlatform', () => {
+    it('should return mobile', () => {
+      expect(_getPlatform({innerWidth: 767})).to.equal('mobile')
+    })
+    it('should return tablet', () => {
+      expect(_getPlatform({innerWidth: 800})).to.equal('tablet')
+    })
+    it('should return desktop', () => {
+      expect(_getPlatform({innerWidth: 1000})).to.equal('desktop')
     })
   })
 })

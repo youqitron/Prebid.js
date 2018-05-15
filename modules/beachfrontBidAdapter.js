@@ -1,14 +1,17 @@
 import * as utils from 'src/utils';
 import { registerBidder } from 'src/adapters/bidderFactory';
+import { Renderer } from 'src/Renderer';
 import { VIDEO, BANNER } from 'src/mediaTypes';
 import find from 'core-js/library/fn/array/find';
 import includes from 'core-js/library/fn/array/includes';
 
 const ADAPTER_VERSION = '1.1';
 const ADAPTER_NAME = 'BFIO_PREBID';
+const OUTSTREAM = 'outstream';
 
 export const VIDEO_ENDPOINT = '//reachms.bfmio.com/bid.json?exchange_id=';
 export const BANNER_ENDPOINT = '//display.bfmio.com/prebid_display';
+export const OUTSTREAM_SRC = '//player-cdn.beachfrontmedia.com/playerapi/loader/outstream.js';
 
 export const VIDEO_TARGETING = ['mimes'];
 export const DEFAULT_MIMES = ['video/mp4', 'application/javascript'];
@@ -21,7 +24,7 @@ export const spec = {
     return !!(bid && bid.params && bid.params.appId && bid.params.bidfloor);
   },
 
-  buildRequests(bids) {
+  buildRequests(bids, bidderRequest) {
     let requests = [];
     let videoBids = bids.filter(bid => isVideoBid(bid));
     let bannerBids = bids.filter(bid => !isVideoBid(bid));
@@ -29,7 +32,7 @@ export const spec = {
       requests.push({
         method: 'POST',
         url: VIDEO_ENDPOINT + bid.params.appId,
-        data: createVideoRequestData(bid),
+        data: createVideoRequestData(bid, bidderRequest),
         bidRequest: bid
       });
     });
@@ -37,7 +40,7 @@ export const spec = {
       requests.push({
         method: 'POST',
         url: BANNER_ENDPOINT,
-        data: createBannerRequestData(bannerBids),
+        data: createBannerRequestData(bannerBids, bidderRequest),
         bidRequest: bannerBids
       });
     }
@@ -53,6 +56,7 @@ export const spec = {
         return [];
       }
       let size = getFirstSize(bidRequest);
+      let context = utils.deepAccess(bidRequest, 'mediaTypes.video.context');
       return {
         requestId: bidRequest.bidId,
         bidderCode: spec.code,
@@ -61,6 +65,7 @@ export const spec = {
         width: size.w,
         height: size.h,
         creativeId: response.cmpId,
+        renderer: context === OUTSTREAM ? createRenderer(bidRequest) : null,
         mediaType: VIDEO,
         currency: 'USD',
         netRevenue: true,
@@ -91,8 +96,35 @@ export const spec = {
   }
 };
 
+function createRenderer(bidRequest) {
+  const renderer = Renderer.install({
+    id: bidRequest.bidId,
+    url: OUTSTREAM_SRC,
+    loaded: false
+  });
+
+  renderer.setRender(outstreamRender);
+
+  return renderer;
+}
+
+function outstreamRender(bid) {
+  bid.renderer.push(() => {
+    window.Beachfront.Player(bid.adUnitCode, {
+      ad_tag_url: bid.vastUrl,
+      width: bid.width,
+      height: bid.height,
+      expand_in_view: false,
+      collapse_on_complete: true
+    });
+  });
+}
+
 function getSizes(bid) {
-  return utils.parseSizesInput(bid.sizes).map(size => {
+  let sizes = (isVideoBid(bid)
+    ? utils.deepAccess(bid, 'mediaTypes.video.playerSize')
+    : utils.deepAccess(bid, 'mediaTypes.banner.sizes')) || bid.sizes;
+  return utils.parseSizesInput(sizes).map(size => {
     let [ width, height ] = size.split('x');
     return {
       w: parseInt(width, 10) || undefined,
@@ -152,11 +184,11 @@ function getVideoParams(bid) {
     }, {});
 }
 
-function createVideoRequestData(bid) {
+function createVideoRequestData(bid, bidderRequest) {
   let size = getFirstSize(bid);
   let video = getVideoParams(bid);
   let topLocation = utils.getTopWindowLocation();
-  return {
+  let payload = {
     isPrebid: true,
     appId: bid.params.appId,
     domain: document.location.hostname,
@@ -182,11 +214,21 @@ function createVideoRequestData(bid) {
       js: 1,
       geo: {}
     },
+    regs: {},
+    user: {},
     cur: ['USD']
   };
+
+  if (bidderRequest && bidderRequest.gdprConsent) {
+    let { consentRequired, consentString } = bidderRequest.gdprConsent;
+    payload.regs.ext = { gdpr: consentRequired ? 1 : 0 };
+    payload.user.ext = { consent: consentString };
+  }
+
+  return payload;
 }
 
-function createBannerRequestData(bids) {
+function createBannerRequestData(bids, bidderRequest) {
   let topLocation = utils.getTopWindowLocation();
   let referrer = utils.getTopWindowReferrer();
   let slots = bids.map(bid => {
@@ -197,7 +239,7 @@ function createBannerRequestData(bids) {
       sizes: getSizes(bid)
     };
   });
-  return {
+  let payload = {
     slots: slots,
     page: topLocation.href,
     domain: topLocation.hostname,
@@ -211,6 +253,14 @@ function createBannerRequestData(bids) {
     adapterVersion: ADAPTER_VERSION,
     adapterName: ADAPTER_NAME
   };
+
+  if (bidderRequest && bidderRequest.gdprConsent) {
+    let { consentRequired, consentString } = bidderRequest.gdprConsent;
+    payload.gdpr = consentRequired ? 1 : 0;
+    payload.gdprConsent = consentString;
+  }
+
+  return payload;
 }
 
 registerBidder(spec);
